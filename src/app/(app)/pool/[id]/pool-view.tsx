@@ -1,29 +1,40 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import Map from "@/components/map";
-import { Badge, Button, Card, ErrorNote, Input, Spinner, buttonClass, cx } from "@/components/ui";
+import { useToast } from "@/components/toaster";
+import { Badge, Button, Card, ErrorNote, Spinner, buttonClass, cx } from "@/components/ui";
 import { airportByIata } from "@/lib/airports";
-import { olaLink, uberLink, upiLink } from "@/lib/deeplinks";
+import { OSRM_ATTRIBUTION } from "@/lib/osrm";
 import { firstName, fmtDay, fmtTime, inr } from "@/lib/format";
+import { formatCarNumber } from "@/lib/booking";
+import { dropArea, groupMessage } from "@/lib/share";
 import { createClient } from "@/lib/supabase/client";
 import type { Pool, PoolMember, PoolPlan } from "@/lib/types";
+import ContactsCard from "./contacts-card";
+import MeetingPoint from "./meeting-point";
 import PoolChat from "./pool-chat";
+import RideFeedback from "./ride-feedback";
+import SosButton from "./sos-button";
+import VehicleCard from "./vehicle-card";
+import WomenOnlyWait from "./women-only-wait";
 
 export interface Person {
   id: string;
-  full_name: string | null;
+  name: string | null;
   gender: string | null;
-  aadhaar_verified: boolean;
-  aadhaar_signature_ok: boolean;
+  verified: boolean;
+  signature_ok: boolean;
   avatar_path: string | null;
   avatar_url?: string | null;
   upi_id: string | null;
+  is_demo?: boolean;
 }
 export interface Contact {
   user_id: string;
-  full_name: string | null;
+  name: string | null;
   phone: string | null;
   phone_verified: boolean;
 }
@@ -34,7 +45,7 @@ export interface Message {
   created_at: string;
 }
 
-const SOURCE_LABEL = { gemini: "Gemini", groq: "Groq", rules: "Rate card", actual: "Actual fare" } as const;
+const SOURCE_LABEL = { gemini: "Gemini estimate", groq: "Groq estimate", rules: "Rate-card estimate", actual: "Final fare" } as const;
 
 export default function PoolView({
   me,
@@ -43,6 +54,8 @@ export default function PoolView({
   people,
   contacts,
   initialMessages,
+  notifyOnMatch,
+  myConfirmation = null,
 }: {
   me: string;
   pool: Pool;
@@ -50,36 +63,38 @@ export default function PoolView({
   people: Person[];
   contacts: Contact[];
   initialMessages: Message[];
+  notifyOnMatch: boolean;
+  /** My answer to "was everyone a woman?" for this ride, if given. */
+  myConfirmation?: boolean | null;
 }) {
   const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
+  const toast = useToast();
   const airport = airportByIata(pool.airport_iata)!;
   const isHost = pool.created_by === me;
   const person = useCallback((id: string) => people.find((p) => p.id === id), [people]);
-  const host = person(pool.created_by);
 
   const [plan, setPlan] = useState<PoolPlan | null>(pool.plan);
   const [planBusy, setPlanBusy] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const [actualFare, setActualFare] = useState("");
 
   useEffect(() => setPlan(pool.plan), [pool.plan]);
 
   const computePlan = useCallback(
-    async (fare?: number) => {
+    async () => {
       setPlanBusy(true);
       const res = await fetch("/api/pool-plan", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ poolId: pool.id, actualFare: fare }),
-      });
-      const body = await res.json();
+        body: JSON.stringify({ poolId: pool.id }),
+      }).catch(() => null);
+      const body = res ? await res.json().catch(() => ({})) : {};
       setPlanBusy(false);
-      if (res.ok) setPlan(body);
-      else setError(body.error ?? "Couldn't plan the route");
+      if (res?.ok) setPlan(body);
+      else toast(body.error ?? (navigator.onLine ? "Couldn't plan the route. Tap refresh to retry." : "You're offline. We'll plan the route when you're back."), "error");
     },
-    [pool.id],
+    [pool.id, toast],
   );
 
   // A join or leave clears the plan; whoever is looking recomputes it.
@@ -103,38 +118,85 @@ export default function PoolView({
     };
   }, [supabase, pool.id, router]);
 
+  // Announce live changes pushed by Realtime (a rider joining or leaving, the group locking).
+  const prev = useRef({ ids: members.map((m) => m.user_id), status: pool.status });
+  useEffect(() => {
+    const before = prev.current;
+    for (const m of members) {
+      if (!before.ids.includes(m.user_id) && m.user_id !== me) {
+        const msg = `${firstName(person(m.user_id)?.name)} joined your Airpool group`;
+        toast(msg, "success");
+        // Also a system notification if they allowed it and the app is in the background.
+        if (typeof Notification !== "undefined" && Notification.permission === "granted" && document.hidden) {
+          new Notification("Airpool", { body: msg });
+        }
+      }
+    }
+    if (members.length < before.ids.length) toast("A rider left the group. Everyone needs to accept again");
+    if (before.status === "open" && pool.status === "locked") toast("Group locked. Names and numbers are now shared", "success");
+    prev.current = { ids: members.map((m) => m.user_id), status: pool.status };
+  }, [members, pool.status, me, person, toast]);
+
   async function rpc(name: string, args: Record<string, unknown>, after?: () => void) {
     setBusy(name);
     setError("");
     const { error } = await supabase.rpc(name, args);
     setBusy("");
-    if (error) return setError(error.message);
+    if (error) {
+      toast(error.message, "error");
+      return setError(error.message);
+    }
+    if (name === "accept_pool") toast("You accepted. Waiting for the others", "success");
+    if (name === "set_pool_status") toast(args.p_status === "completed" ? "Ride marked as done" : "Group updated", "success");
     after?.();
     router.refresh();
   }
 
   const order = plan?.drop_order ?? members.map((m) => m.user_id);
   const ordered = order.map((id) => members.find((m) => m.user_id === id)).filter((m): m is PoolMember => !!m);
-  const finalDrop = ordered.at(-1);
   const myShare = plan?.shares.find((s) => s.user_id === me);
   const seatsUsed = members.reduce((s, m) => s + m.pax, 0);
   const locked = pool.status === "locked" || pool.status === "completed";
-  const pickup = { lat: airport.lat, lng: airport.lng, name: `${airport.iata} Airport` };
+  const mine = members.find((m) => m.user_id === me);
+  const acceptedCount = members.filter((m) => m.accepted).length;
+  const capacity = Math.min(pool.max_pax, 6);
+  const area = (m: PoolMember) => dropArea(pool.airport_iata, m.dest_zone, m.dest_label);
+  // Full verified names only after lock (get_pool_contacts returns nothing before).
+  const displayName = (id: string) => (locked ? contacts.find((c) => c.user_id === id)?.name : null) ?? firstName(person(id)?.name);
+
+  // Used by WhatsApp/family sharing (after lock) and SOS (any time). Phones only exist after lock.
+  const shareText = groupMessage({
+    airportName: airport.name,
+    airportIata: airport.iata,
+    day: fmtDay(members[0]?.arrival_at ?? pool.created_at),
+    car: plan ? plan.vehicle : null,
+    meeting: pool.meeting_point ? { point: pool.meeting_point, note: pool.meeting_note } : null,
+    riders: ordered.map((m) => ({
+      name: displayName(m.user_id),
+      phone: contacts.find((c) => c.user_id === m.user_id)?.phone ?? null,
+      flight: m.flight_iata,
+      landsAt: m.arrival_at,
+      area: area(m),
+    })),
+    cab: pool.car_number ? { number: formatCarNumber(pool.car_number), driver: pool.driver_name, model: pool.car_model } : null,
+  });
 
   return (
-    <div className="grid gap-4 pb-6">
+    <div className="grid grid-cols-1 gap-4 pb-6">
       <section>
         <p className="font-mono text-xs text-muted">
           {airport.iata} · {fmtDay(members[0]?.arrival_at ?? pool.created_at)}
         </p>
         <div className="mt-1 flex items-center justify-between gap-2">
-          <h1 className="text-2xl font-bold tracking-tight">{airport.city} pool</h1>
-          <Badge tone={pool.status === "open" ? "accent" : pool.status === "locked" ? "ok" : "muted"}>{pool.status}</Badge>
+          <h1 className="text-2xl font-bold tracking-tight">Your {airport.city} group</h1>
+          <Badge tone={pool.status === "open" ? "accent" : pool.status === "locked" ? "ok" : "muted"}>
+            {pool.status === "open" ? "forming" : pool.status}
+          </Badge>
         </div>
         <div className="mt-2 flex flex-wrap gap-2">
           {pool.women_only && <Badge tone="women">Women only</Badge>}
           <Badge>
-            {seatsUsed}/{pool.max_pax} seats
+            {seatsUsed}/{capacity} seats
           </Badge>
           {plan && (
             <Badge>
@@ -144,12 +206,64 @@ export default function PoolView({
         </div>
       </section>
 
+      {pool.status === "open" && (
+        <Card className="grid grid-cols-1 gap-3 border-accent/30">
+          <div className="flex items-center justify-between gap-2">
+            <p className="font-semibold">
+              {acceptedCount} of {members.length} accepted
+            </p>
+            <div className="flex gap-1" aria-hidden>
+              {members.map((m) => (
+                <span key={m.user_id} className={cx("size-2.5 rounded-full", m.accepted ? "bg-ok" : "bg-line")} />
+              ))}
+            </div>
+          </div>
+          <p className="text-sm text-muted">
+            {members.length < 2
+              ? "Waiting for someone to join. You'll see them appear here live."
+              : `The group locks when everyone accepts or all ${capacity} seats fill up. Then everyone sees full names and phone numbers.`}
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            {mine?.accepted ? (
+              <span className={cx(buttonClass("ghost"), "pointer-events-none text-ok")}>✓ You accepted</span>
+            ) : (
+              <Button onClick={() => rpc("accept_pool", { p_pool: pool.id })} disabled={!!busy || members.length < 2}>
+                {busy === "accept_pool" && <Spinner />} Accept
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              disabled={!!busy}
+              onClick={() => {
+                if (confirm("Leave this group?")) rpc("leave_pool", { p_pool: pool.id }, () => router.push("/dashboard"));
+              }}
+            >
+              Leave
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {pool.status === "open" && members.length === 1 && !pool.women_only && <NotifyMe />}
+
+      {isHost && pool.women_only && pool.status === "open" && (
+        <WomenOnlyWait
+          poolId={pool.id}
+          createdAt={pool.created_at}
+          waitUntil={pool.women_wait_until}
+          alone={members.length === 1}
+          notify={notifyOnMatch}
+          memberCount={members.length}
+          onChanged={() => router.refresh()}
+        />
+      )}
+
       <Map
         airport={{ lat: airport.lat, lng: airport.lng, label: airport.name }}
         stops={ordered.map((m, i) => ({
           lat: m.dest_lat,
           lng: m.dest_lng,
-          label: `${i + 1}. ${firstName(person(m.user_id)?.full_name)}: ${m.dest_label}`,
+          label: `${i + 1}. ${displayName(m.user_id)}: ${area(m)}`,
           n: i + 1,
           mine: m.user_id === me,
         }))}
@@ -157,7 +271,7 @@ export default function PoolView({
       />
 
       {/* Riders in drop order */}
-      <Card className="grid gap-3">
+      <Card className="grid grid-cols-1 gap-3">
         <h2 className="font-mono text-xs uppercase tracking-[0.2em] text-muted">Riders · drop order</h2>
         {ordered.map((m, i) => {
           const p = person(m.user_id);
@@ -170,47 +284,52 @@ export default function PoolView({
                 <img src={p.avatar_url} alt="" className="size-10 rounded-full object-cover" />
               ) : (
                 <span className="grid size-10 place-items-center rounded-full bg-surface-2 font-semibold">
-                  {firstName(p?.full_name)[0]}
+                  {firstName(p?.name)[0]}
                 </span>
               )}
               <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-1.5 truncate font-medium">
-                  {firstName(p?.full_name)}
+                <p className="flex flex-wrap items-center gap-1.5 font-medium">
+                  <span className="truncate">{displayName(m.user_id)}</span>
                   {m.user_id === me && <span className="text-xs text-muted">(you)</span>}
+                  {p?.verified && <Badge tone="ok">✓ Verified</Badge>}
+                  {p?.is_demo && <Badge>Demo</Badge>}
                   {m.user_id === pool.created_by && <Badge tone="accent">host</Badge>}
-                  {p?.aadhaar_verified && <span className="text-ok" title="Aadhaar verified">✓</span>}
                 </p>
-                <p className="truncate text-xs text-muted">
-                  {m.dest_label.split(",").slice(0, 2).join(",")} · lands {fmtTime(m.arrival_at)}
+                <p className="text-xs text-muted">
+                  Drop-off: <span className="text-ink">{area(m)}</span>
+                  {share && <> · {share.km} km by road</>} · lands {fmtTime(m.arrival_at)}
                   {m.flight_iata && ` · ${m.flight_iata}`}
                 </p>
                 <p className="text-xs text-muted">
-                  {m.pax} pax · {m.checked_bags} checked · {m.cabin_bags} cabin
+                  {m.pax} {m.pax === 1 ? "person" : "people"} · 🧳 {m.checked_bags} check-in · {m.cabin_bags} cabin
+                  {pool.status === "open" && (
+                    <span className={cx("ml-1.5", m.accepted ? "text-ok" : "text-muted")}>
+                      · {m.accepted ? "accepted" : "deciding"}
+                    </span>
+                  )}
                 </p>
               </div>
               {share && (
                 <div className="text-right">
                   <p className="font-mono text-sm">{inr(share.amount)}</p>
-                  {m.user_id !== pool.created_by &&
-                    (isHost ? (
-                      <button
-                        className={cx("text-xs", m.paid ? "text-ok" : "text-muted underline")}
-                        onClick={() => rpc("set_member_paid", { p_pool: pool.id, p_user: m.user_id, p_paid: !m.paid })}
-                      >
-                        {m.paid ? "paid ✓" : "mark paid"}
-                      </button>
-                    ) : (
-                      <p className={cx("text-xs", m.paid ? "text-ok" : "text-muted")}>{m.paid ? "paid ✓" : "unpaid"}</p>
-                    ))}
+                  {!plan?.final && <p className="text-[10px] text-muted">estimate</p>}
+                  {pool.booked_at && m.user_id !== pool.booker_id && (
+                    <p className={cx("text-xs", m.paid ? "text-ok" : "text-muted")}>{m.paid ? "paid ✓" : "unpaid"}</p>
+                  )}
                 </div>
               )}
             </div>
           );
         })}
+        <p className="text-[11px] text-muted">
+          {plan?.route_source === "straight-line"
+            ? "Routing service unavailable. Order and distances are approximate."
+            : `Drop order and road distances: ${OSRM_ATTRIBUTION}`}
+        </p>
       </Card>
 
       {/* AI vehicle + fare */}
-      <Card className="grid gap-3">
+      <Card className="grid grid-cols-1 gap-3">
         <div className="flex items-center justify-between">
           <h2 className="font-mono text-xs uppercase tracking-[0.2em] text-muted">Ride plan</h2>
           <button className="text-xs text-muted underline" onClick={() => computePlan()} disabled={planBusy}>
@@ -224,194 +343,149 @@ export default function PoolView({
         )}
         {plan && (
           <>
-            <div className="rounded-xl bg-surface-2 p-3">
-              <div className="flex items-center justify-between">
-                <p className="font-semibold">{plan.vehicle.label}</p>
-                <Badge tone="accent">AI · {SOURCE_LABEL[plan.vehicle.source]}</Badge>
-              </div>
-              <p className="mt-0.5 text-xs text-muted">
-                {plan.vehicle.uber} / {plan.vehicle.ola} · {plan.vehicle.seats} seats
-              </p>
-              <p className="mt-2 text-sm">{plan.vehicle.reason}</p>
-            </div>
+            <VehicleCard v={plan.vehicle} />
             <div className="flex items-end justify-between">
               <div>
-                <p className="text-xs text-muted">
-                  Total fare · {SOURCE_LABEL[plan.fare_source]}
-                  {plan.fare_source !== "actual" && " estimate"}
-                </p>
+                <p className="text-xs text-muted">{SOURCE_LABEL[plan.fare_source]}</p>
                 <p className="font-mono text-2xl">{inr(plan.fare_total)}</p>
               </div>
               {myShare && (
                 <div className="text-right">
-                  <p className="text-xs text-muted">Your share · {myShare.km} km</p>
+                  <p className="text-xs text-muted">
+                    Your share{!plan.final && " (est.)"} · {myShare.km} km
+                  </p>
                   <p className="font-mono text-2xl text-accent">{inr(myShare.amount)}</p>
                 </div>
               )}
             </div>
             <p className="text-xs text-muted">
-              {plan.fare_note} Each leg is shared by whoever is still in the cab, so you only pay for the distance you
-              ride.
+              {plan.final
+                ? plan.split_method === "ai"
+                  ? "Split calculated by AI and checked against the distance formula."
+                  : plan.split_note ?? "Split by road distance from the airport."
+                : `${plan.fare_note} Shares follow each rider's road distance from the airport. The booker enters the real fare after the ride.`}
             </p>
-            {isHost && (
-              <form
-                className="grid grid-cols-[1fr_auto] gap-2"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const n = Number(actualFare);
-                  if (n > 0) computePlan(n).then(() => setActualFare(""));
-                }}
-              >
-                <Input
-                  inputMode="numeric"
-                  placeholder="Actual fare paid (₹)"
-                  value={actualFare}
-                  onChange={(e) => setActualFare(e.target.value.replace(/\D/g, ""))}
-                />
-                <Button variant="ghost" type="submit" disabled={!actualFare || planBusy}>
-                  Re-split
-                </Button>
-              </form>
-            )}
+            <Link href={`/pool/${pool.id}/fare`} className={buttonClass("ghost", true)}>
+              See fare breakdown
+            </Link>
           </>
         )}
       </Card>
 
-      {/* Booking */}
-      {isHost && finalDrop && (
-        <Card className="grid gap-3">
-          <h2 className="font-mono text-xs uppercase tracking-[0.2em] text-muted">Book the cab</h2>
-          <div className="grid grid-cols-2 gap-2">
-            <a
-              className={buttonClass("ghost")}
-              href={uberLink(pickup, { lat: finalDrop.dest_lat, lng: finalDrop.dest_lng, name: finalDrop.dest_label.split(",")[0] })}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open Uber
-            </a>
-            <a
-              className={buttonClass("ghost")}
-              href={olaLink(pickup, { lat: finalDrop.dest_lat, lng: finalDrop.dest_lng, name: finalDrop.dest_label.split(",")[0] })}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open Ola
-            </a>
-          </div>
-          {ordered.length > 1 && (
-            <p className="text-xs text-muted">
-              Final drop is pre-filled. Add stops in the app in this order:{" "}
-              {ordered
-                .slice(0, -1)
-                .map((m) => m.dest_label.split(",")[0])
-                .join(" → ")}
-              .
-            </p>
-          )}
-          {plan && <p className="text-xs text-muted">Choose {plan.vehicle.uber} on Uber or {plan.vehicle.ola} on Ola.</p>}
-        </Card>
-      )}
 
-      {/* Payment */}
-      {!isHost && myShare && (
-        <Card className="grid gap-3">
-          <h2 className="font-mono text-xs uppercase tracking-[0.2em] text-muted">Pay the host</h2>
-          {host?.upi_id ? (
-            <>
-              <a
-                className={buttonClass("primary", true)}
-                href={upiLink(host.upi_id, host.full_name ?? "Airpool host", myShare.amount, `Airpool ${airport.iata} cab share`)}
-              >
-                Pay {inr(myShare.amount)} via UPI
-              </a>
-              <p className="text-center text-xs text-muted">
-                to {host.upi_id} · opens GPay, PhonePe, Paytm or BHIM
+      {locked && (
+        <Link href={`/pool/${pool.id}/book`} className="block">
+          <Card className="flex items-center justify-between gap-3 border-accent/50 bg-accent/5 transition hover:border-accent">
+            <div>
+              <p className="font-semibold">{pool.booked_at ? "Cab booked · payments" : "Book the cab"}</p>
+              <p className="text-sm text-muted">
+                {pool.booked_at
+                  ? `${pool.car_model || "Car"} ${pool.car_number ?? ""} · driver ${pool.driver_name}`
+                  : "Pick a booker, open Uber or Ola, then share the driver details."}
               </p>
-            </>
-          ) : (
-            <p className="text-sm text-muted">{firstName(host?.full_name)} hasn&apos;t added a UPI ID yet. Ask in the chat.</p>
-          )}
-        </Card>
-      )}
-      {isHost && !host?.upi_id && members.length > 1 && (
-        <Card className="border-accent/40 text-sm">
-          Add your UPI ID in{" "}
-          <a href="/profile" className="text-accent underline">
-            Profile
-          </a>{" "}
-          so riders can pay you back in one tap.
-        </Card>
+            </div>
+            <span className="text-accent" aria-hidden>
+              →
+            </span>
+          </Card>
+        </Link>
       )}
 
-      {/* Safety */}
-      <Card className="grid gap-3">
-        <h2 className="font-mono text-xs uppercase tracking-[0.2em] text-muted">Safety</h2>
-        {locked ? (
-          <div className="grid gap-2">
-            {contacts
-              .filter((c) => c.user_id !== me)
-              .map((c) => (
-                <div key={c.user_id} className="flex items-center justify-between rounded-xl bg-surface-2 px-3 py-2.5">
-                  <div>
-                    <p className="font-medium">{firstName(c.full_name)}</p>
-                    <p className="font-mono text-sm text-muted">
-                      {c.phone ?? "no number"}
-                      {c.phone_verified && <span className="ml-1.5 text-xs text-ok">matches Aadhaar</span>}
-                    </p>
-                  </div>
-                  {c.phone && (
-                    <a href={`tel:+91${c.phone}`} className={buttonClass("ghost")}>
-                      Call
-                    </a>
-                  )}
-                </div>
-              ))}
-          </div>
-        ) : (
-          <p className="text-sm text-muted">
-            🔒 Phone numbers unlock for everyone once the host locks the group. Until then, use the chat below.
-          </p>
-        )}
-        <a href="tel:112" className={buttonClass("danger", true)}>
-          Emergency · call 112
-        </a>
-      </Card>
+      {(pool.status === "open" || pool.status === "locked") && (
+        <MeetingPoint
+          poolId={pool.id}
+          point={pool.meeting_point}
+          note={pool.meeting_note}
+          editable
+          onSaved={() => router.refresh()}
+        />
+      )}
+
+      {/* Safety: names and numbers only after lock */}
+      {locked ? (
+        <ContactsCard me={me} contacts={contacts} message={shareText} />
+      ) : (
+        <Card className="text-sm text-muted">
+          🔒 Full names and phone numbers appear here once everyone accepts or the car is full. Until then, use the group
+          chat below.
+        </Card>
+      )}
+      <SosButton poolId={pool.id} details={shareText} />
+
+      {locked && (
+        <RideFeedback
+          poolId={pool.id}
+          womenOnly={pool.women_only}
+          completed={pool.status === "completed"}
+          confirmed={myConfirmation}
+          riders={members.filter((m) => m.user_id !== me).map((m) => ({ id: m.user_id, name: displayName(m.user_id) }))}
+          onDone={() => router.refresh()}
+        />
+      )}
 
       <ErrorNote>{error}</ErrorNote>
 
-      {/* Host controls */}
-      <div className="grid gap-2">
-        {isHost && pool.status === "open" && (
-          <Button full onClick={() => rpc("set_pool_status", { p_pool: pool.id, p_status: "locked" })} disabled={!!busy || members.length < 2}>
-            {busy === "set_pool_status" && <Spinner />} Lock group & share numbers
+      {pool.status === "locked" && (
+        <div className="grid grid-cols-2 gap-2">
+          <Button
+            variant="outline"
+            disabled={!!busy}
+            onClick={() => {
+              if (confirm("Leave this locked group? It will reopen for everyone else.")) {
+                rpc("leave_pool", { p_pool: pool.id }, () => router.push("/dashboard"));
+              }
+            }}
+          >
+            Leave group
           </Button>
-        )}
-        {isHost && pool.status === "locked" && (
-          <div className="grid grid-cols-2 gap-2">
-            <Button variant="ghost" onClick={() => rpc("set_pool_status", { p_pool: pool.id, p_status: "open" })} disabled={!!busy}>
-              Reopen
-            </Button>
+          {isHost ? (
             <Button onClick={() => rpc("set_pool_status", { p_pool: pool.id, p_status: "completed" })} disabled={!!busy}>
               Ride done
             </Button>
-          </div>
-        )}
-        {(pool.status === "open" || pool.status === "locked") && (
-          <Button
-            variant="outline"
-            full
-            disabled={!!busy}
-            onClick={() => {
-              if (confirm("Leave this pool?")) rpc("leave_pool", { p_pool: pool.id }, () => router.push("/dashboard"));
-            }}
-          >
-            Leave pool
-          </Button>
-        )}
-      </div>
+          ) : (
+            <span />
+          )}
+        </div>
+      )}
 
       <PoolChat poolId={pool.id} me={me} people={people} initial={initialMessages} />
     </div>
+  );
+}
+
+/** Asks for notification permission so a join can alert the rider while the app is in the background. */
+function NotifyMe() {
+  const toast = useToast();
+  const [perm, setPerm] = useState<NotificationPermission | "unsupported">("default");
+  useEffect(() => setPerm(typeof Notification === "undefined" ? "unsupported" : Notification.permission), []);
+
+  if (perm === "unsupported") return null;
+  return (
+    <Card className="grid grid-cols-1 gap-2 text-center">
+      <p className="text-3xl" aria-hidden>
+        🛬
+      </p>
+      <p className="font-semibold">No one on your flight yet</p>
+      <p className="text-sm text-muted">
+        Your group is visible to verified riders landing near your time and heading your way. Keep this page open.
+      </p>
+      {perm === "granted" ? (
+        <p className="text-sm text-ok">✓ We&apos;ll notify you the moment someone joins.</p>
+      ) : perm === "denied" ? (
+        <p className="text-xs text-muted">Notifications are blocked in your browser settings. You&apos;ll still see joins here.</p>
+      ) : (
+        <Button
+          variant="ghost"
+          full
+          onClick={async () => {
+            const p = await Notification.requestPermission().catch(() => "denied" as const);
+            setPerm(p);
+            if (p === "granted") toast("We'll notify you when someone joins", "success");
+          }}
+        >
+          🔔 Notify me when someone joins
+        </Button>
+      )}
+    </Card>
   );
 }

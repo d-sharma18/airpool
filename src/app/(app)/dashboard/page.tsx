@@ -25,11 +25,11 @@ export default async function Dashboard() {
   return (
     <div className="grid gap-6">
       <section>
-        <p className="text-sm text-muted">Hi {firstName(profile.full_name)},</p>
+        <p className="text-sm text-muted">Hi {firstName(profile.verified_name ?? profile.full_name)},</p>
         <h1 className="text-2xl font-bold tracking-tight">Where are you landing?</h1>
       </section>
 
-      {!profile.aadhaar_verified && (
+      {!profile.verified && (
         <Card className="border-accent/40 bg-accent/5">
           <p className="font-semibold">Verify your Aadhaar to start pooling</p>
           <p className="mt-1 text-sm text-muted">One time, about 2 minutes. Keeps every ride verified.</p>
@@ -39,7 +39,7 @@ export default async function Dashboard() {
         </Card>
       )}
 
-      {profile.aadhaar_verified && (
+      {profile.verified && (
         <Link href="/trip/new" className={buttonClass("primary", true)}>
           + Plan a shared ride
         </Link>
@@ -47,7 +47,19 @@ export default async function Dashboard() {
 
       <section className="grid gap-3">
         <h2 className="font-mono text-xs uppercase tracking-[0.2em] text-muted">Upcoming</h2>
-        {upcoming.length === 0 && <p className="text-sm text-muted">No rides yet. Add your flight to find co-riders.</p>}
+        {upcoming.length === 0 && (
+          <Card className="grid gap-1 text-center">
+            <p className="text-3xl" aria-hidden>
+              ✈️
+            </p>
+            <p className="font-semibold">No rides planned</p>
+            <p className="text-sm text-muted">
+              {profile.verified
+                ? "Add your flight and we'll find verified people landing with you, going your way."
+                : "Verify once, then add your flight to find co-riders."}
+            </p>
+          </Card>
+        )}
         {upcoming.map((r) => (
           <PoolRow key={r.pool_id} r={r} />
         ))}

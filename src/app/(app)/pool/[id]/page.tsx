@@ -10,7 +10,7 @@ export default async function PoolPage({ params }: { params: Promise<{ id: strin
   const { data: pool } = await supabase.from("pools").select("*").eq("id", id).maybeSingle<Pool>();
   if (!pool) notFound();
 
-  const [{ data: members }, { data: messages }, contactsRes] = await Promise.all([
+  const [{ data: members }, { data: messages }, contactsRes, { data: myTrip }, { data: myConfirm }] = await Promise.all([
     supabase.from("pool_members").select("*").eq("pool_id", id).order("joined_at").returns<PoolMember[]>(),
     supabase
       .from("messages")
@@ -22,16 +22,15 @@ export default async function PoolPage({ params }: { params: Promise<{ id: strin
     pool.status === "locked" || pool.status === "completed"
       ? supabase.rpc("get_pool_contacts", { p_pool: id })
       : Promise.resolve({ data: [] }),
+    supabase.from("trip_requests").select("notify_on_match").eq("pool_id", id).eq("user_id", user.id).maybeSingle(),
+    supabase.from("ride_confirmations").select("all_women").eq("pool_id", id).eq("user_id", user.id).maybeSingle(),
   ]);
 
-  const ids = (members ?? []).map((m) => m.user_id);
-  const { data: people } = await supabase
-    .from("profiles")
-    .select("id, full_name, gender, aadhaar_verified, aadhaar_signature_ok, avatar_path, upi_id")
-    .in("id", ids)
-    .returns<Person[]>();
+  // Profiles are owner-only under RLS; co-riders get a safe subset through this RPC.
+  const { data } = await supabase.rpc("get_pool_people", { p_pool: id });
+  const people = (data ?? []) as Person[];
 
-  const paths = (people ?? []).map((p) => p.avatar_path).filter((p): p is string => !!p);
+  const paths = people.map((p) => p.avatar_path).filter((p): p is string => !!p);
   const { data: signed } = paths.length
     ? await supabase.storage.from("selfies").createSignedUrls(paths, 3600)
     : { data: [] };
@@ -42,9 +41,11 @@ export default async function PoolPage({ params }: { params: Promise<{ id: strin
       me={user.id}
       pool={pool}
       members={members ?? []}
-      people={(people ?? []).map((p) => ({ ...p, avatar_url: p.avatar_path ? avatarByPath[p.avatar_path] ?? null : null }))}
+      people={people.map((p) => ({ ...p, avatar_url: p.avatar_path ? avatarByPath[p.avatar_path] ?? null : null }))}
       contacts={(contactsRes.data ?? []) as Contact[]}
       initialMessages={(messages ?? []).reverse()}
+      notifyOnMatch={!!myTrip?.notify_on_match}
+      myConfirmation={myConfirm ? myConfirm.all_women : null}
     />
   );
 }

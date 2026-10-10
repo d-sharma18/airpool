@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from "react";
+import type { ButtonHTMLAttributes, ComponentProps, ReactNode, SelectHTMLAttributes } from "react";
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
 
@@ -6,7 +6,7 @@ type Variant = "primary" | "ghost" | "danger" | "outline";
 
 export function buttonClass(variant: Variant = "primary", full = false) {
   return cx(
-    "inline-flex items-center justify-center gap-2 rounded-xl px-4 h-12 text-[15px] font-semibold transition active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none",
+    "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 h-12 text-[15px] font-semibold transition active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none",
     full && "w-full",
     variant === "primary" && "bg-accent text-accent-ink hover:brightness-110",
     variant === "ghost" && "bg-surface-2 text-ink hover:bg-line",
@@ -37,11 +37,48 @@ export function Label({ children, hint }: { children: ReactNode; hint?: ReactNod
   );
 }
 
+/** Label + control + inline error, with the error linked for screen readers. */
+export function Field({
+  label,
+  hint,
+  error,
+  id,
+  children,
+}: {
+  label: ReactNode;
+  hint?: ReactNode;
+  error?: string | null;
+  id: string;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <label htmlFor={id}>
+        <Label hint={hint}>{label}</Label>
+      </label>
+      {children}
+      {error && (
+        <p id={`${id}-error`} role="alert" className="mt-1.5 text-sm text-danger">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 const fieldClass =
   "h-12 w-full rounded-xl border border-line bg-surface-2 px-3.5 text-ink placeholder:text-muted/60 outline-none focus:border-accent";
 
-export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={cx(fieldClass, className)} {...props} />;
+// React 19 passes `ref` through as a normal prop, so it lands on the <input>.
+export function Input({ className, invalid, ...props }: ComponentProps<"input"> & { invalid?: boolean }) {
+  return (
+    <input
+      aria-invalid={invalid || undefined}
+      aria-describedby={invalid && props.id ? `${props.id}-error` : undefined}
+      className={cx(fieldClass, invalid && "border-danger! focus:border-danger!", className)}
+      {...props}
+    />
+  );
 }
 
 export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
@@ -58,7 +95,7 @@ export function Badge({
   return (
     <span
       className={cx(
-        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
+        "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium",
         tone === "muted" && "bg-surface-2 text-muted",
         tone === "accent" && "bg-accent/15 text-accent",
         tone === "ok" && "bg-ok/15 text-ok",

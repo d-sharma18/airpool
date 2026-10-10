@@ -57,10 +57,10 @@ export default function PoolChat({
     else setMessages((prev) => (prev.some((x) => x.id === data.id) ? prev : [...prev, data]));
   }
 
-  const nameOf = (id: string) => firstName(people.find((p) => p.id === id)?.full_name);
+  const nameOf = (id: string) => firstName(people.find((p) => p.id === id)?.name);
 
   return (
-    <Card className="grid gap-3">
+    <Card className="grid grid-cols-1 gap-3">
       <h2 className="font-mono text-xs uppercase tracking-[0.2em] text-muted">Group chat</h2>
       <div className="grid max-h-80 gap-2 overflow-y-auto">
         {messages.length === 0 && <p className="text-sm text-muted">Say hi and agree on a meeting point at arrivals.</p>}

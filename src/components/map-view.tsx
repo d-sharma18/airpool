@@ -14,10 +14,11 @@ export interface MapStop {
   mine?: boolean;
 }
 
-// CARTO's free dark basemap over OpenStreetMap data. No API key.
-const TILES = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
-const ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>';
+// Standard OpenStreetMap tiles (free, no key), darkened with a CSS filter (.dark-tiles in globals.css).
+// CARTO's dark basemap now needs an API key, so we don't use it.
+const TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const ROUTE_ATTRIBUTION = `${ATTRIBUTION} · Routes &copy; <a href="https://project-osrm.org/">OSRM</a>`;
 
 const pin = (text: string, bg: string, fg: string) =>
   L.divIcon({
@@ -51,7 +52,13 @@ export default function MapView({
   return (
     <div className={`${className} overflow-hidden rounded-2xl border border-line`}>
       <MapContainer center={[airport.lat, airport.lng]} zoom={11} className="size-full" zoomControl={false} attributionControl>
-        <TileLayer url={TILES} attribution={ATTRIBUTION} subdomains="abcd" maxZoom={19} />
+        <TileLayer
+          key={route && route.length > 1 ? "with-route" : "plain"}
+          url={TILES}
+          attribution={route && route.length > 1 ? ROUTE_ATTRIBUTION : ATTRIBUTION}
+          maxZoom={19}
+          className="dark-tiles"
+        />
         {route && route.length > 1 && <Polyline positions={route} pathOptions={{ color: "#f5b83d", weight: 4, opacity: 0.9 }} />}
         <Marker position={[airport.lat, airport.lng]} icon={pin("✈", "#e8ecf2", "#07090d")}>
           <Tooltip>{airport.label}</Tooltip>

@@ -2,63 +2,79 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { Button, Card, ErrorNote, Input, Label, Spinner } from "@/components/ui";
-import { UPI_ID_RE } from "@/lib/deeplinks";
+import { useToast } from "@/components/toaster";
+import { Button, Card, ErrorNote, Field, Input, Spinner } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
+import { normalizePhone, validateFullName, validatePhone, validateUpi } from "@/lib/validation";
 
-export default function ProfileForm({
-  userId,
-  upi: initialUpi,
-  phone: initialPhone,
-  phoneVerified,
-}: {
+export default function ProfileForm(props: {
   userId: string;
-  upi: string;
+  email: string;
+  fullName: string;
   phone: string;
-  phoneVerified: boolean;
+  upi: string;
+  phoneLocked: boolean;
 }) {
   const router = useRouter();
-  const [upi, setUpi] = useState(initialUpi);
-  const [phone, setPhone] = useState(initialPhone);
+  const toast = useToast();
+  const [fullName, setFullName] = useState(props.fullName);
+  const [phone, setPhone] = useState(props.phone);
+  const [upi, setUpi] = useState(props.upi);
+  const [errs, setErrs] = useState<{ fullName?: string | null; phone?: string | null; upi?: string | null }>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [saved, setSaved] = useState(false);
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
-    setSaved(false);
-    if (upi && !UPI_ID_RE.test(upi)) return setError("UPI ID looks wrong. It should look like name@okhdfcbank.");
-    const digits = phone.replace(/\D/g, "").slice(-10);
-    if (phone && !/^[6-9]\d{9}$/.test(digits)) return setError("Enter a valid 10-digit mobile number.");
+    const found = {
+      fullName: validateFullName(fullName),
+      phone: props.phoneLocked ? null : validatePhone(phone),
+      upi: validateUpi(upi),
+    };
+    setErrs(found);
+    if (Object.values(found).some(Boolean)) return;
 
     setBusy(true);
-    const supabase = createClient();
-    const r1 = await supabase.from("profiles").update({ upi_id: upi || null }).eq("id", userId);
-    const r2 =
-      digits !== initialPhone
-        ? await supabase.from("profile_private").update({ phone: digits || null }).eq("user_id", userId)
-        : { error: null };
+    setError("");
+    const update: Record<string, string> = { full_name: fullName.trim(), upi_id: upi.trim() };
+    if (!props.phoneLocked) update.phone = normalizePhone(phone);
+    const { error } = await createClient().from("profiles").update(update).eq("id", props.userId);
     setBusy(false);
-    if (r1.error || r2.error) return setError((r1.error ?? r2.error)!.message);
-    setSaved(true);
+    if (error) return setError(error.message);
+    toast("Profile saved", "success");
     router.refresh();
   }
 
   return (
     <Card>
-      <form onSubmit={save} className="grid gap-4">
-        <label>
-          <Label hint="Riders pay you here">UPI ID</Label>
-          <Input value={upi} onChange={(e) => setUpi(e.target.value.trim())} placeholder="yourname@okaxis" autoCapitalize="none" />
-        </label>
-        <label>
-          <Label hint={phoneVerified ? "✓ matches Aadhaar" : "Shared only in locked groups"}>Mobile number</Label>
-          <Input type="tel" inputMode="numeric" value={phone} onChange={(e) => setPhone(e.target.value)} />
-        </label>
-        {phoneVerified && <p className="-mt-2 text-xs text-muted">Changing your number removes the Aadhaar tick.</p>}
+      <form onSubmit={save} noValidate className="grid gap-4">
+        <Field id="email" label="Email">
+          <Input id="email" value={props.email} disabled className="opacity-60" />
+        </Field>
+        <Field id="fullName" label="Full name" error={errs.fullName}>
+          <Input id="fullName" autoComplete="name" value={fullName} invalid={!!errs.fullName} onChange={(e) => setFullName(e.target.value)} />
+        </Field>
+        <Field
+          id="phone"
+          label="Mobile number"
+          hint={props.phoneLocked ? "Locked to your Aadhaar" : "Must be Aadhaar-linked"}
+          error={errs.phone}
+        >
+          <Input
+            id="phone"
+            type="tel"
+            inputMode="numeric"
+            value={phone}
+            disabled={props.phoneLocked}
+            className={props.phoneLocked ? "opacity-60" : undefined}
+            invalid={!!errs.phone}
+            onChange={(e) => setPhone(e.target.value)}
+          />
+        </Field>
+        <Field id="upi" label="UPI ID" hint="Co-riders pay you here" error={errs.upi}>
+          <Input id="upi" autoCapitalize="none" autoCorrect="off" spellCheck={false} placeholder="name@bank" value={upi} invalid={!!errs.upi} onChange={(e) => setUpi(e.target.value)} />
+        </Field>
         <ErrorNote>{error}</ErrorNote>
-        {saved && <p className="text-sm text-ok">Saved</p>}
         <Button type="submit" full disabled={busy}>
           {busy && <Spinner />} Save
         </Button>

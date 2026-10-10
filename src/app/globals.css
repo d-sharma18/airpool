@@ -39,9 +39,27 @@ textarea {
   font-size: 16px; /* stops iOS zooming into fields */
 }
 
-/* Leaflet on dark */
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Leaflet on dark: OSM tiles inverted into a dark map. Only the tile layer is
+   filtered, so pins, route lines and controls keep their real colours. */
+.dark-tiles {
+  filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.35);
+}
 .leaflet-container {
-  background: var(--color-surface);
+  background: var(--color-surface) !important; /* leaflet.css loads later and sets light gray */
   font-family: var(--font-sans);
 }
 .leaflet-control-attribution {

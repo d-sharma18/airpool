@@ -21,12 +21,19 @@ function labelOf(p: PhotonFeature["properties"]) {
     .join(", ");
 }
 
+// Same query near the same airport → reuse the answer instead of calling Photon again.
+const searchCache = new Map<string, Place[]>();
+
 /** Address autocomplete via Photon (komoot), biased to the airport's city and bounded to India. */
 export default function PlaceSearch({
+  id,
+  invalid,
   near,
   value,
   onSelect,
 }: {
+  id?: string;
+  invalid?: boolean;
   near?: { lat: number; lng: number };
   value: Place | null;
   onSelect: (p: Place | null) => void;
@@ -35,11 +42,19 @@ export default function PlaceSearch({
   const [results, setResults] = useState<Place[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
+  const [failed, setFailed] = useState(false);
   const ctrl = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (q.trim().length < 3 || q === value?.label) {
       setResults([]);
+      return;
+    }
+    const cacheKey = `${q.trim().toLowerCase()}|${near?.lat ?? ""},${near?.lng ?? ""}`;
+    const hit = searchCache.get(cacheKey);
+    if (hit) {
+      setResults(hit);
+      setOpen(true);
       return;
     }
     const t = setTimeout(async () => {
@@ -54,16 +69,17 @@ export default function PlaceSearch({
         }
         const res = await fetch(`https://photon.komoot.io/api/?${params}`, { signal: ctrl.current.signal });
         const data = (await res.json()) as { features: PhotonFeature[] };
-        setResults(
-          data.features.map((f) => ({
-            label: labelOf(f.properties),
-            lng: f.geometry.coordinates[0],
-            lat: f.geometry.coordinates[1],
-          })),
-        );
+        const places = data.features.map((f) => ({
+          label: labelOf(f.properties),
+          lng: f.geometry.coordinates[0],
+          lat: f.geometry.coordinates[1],
+        }));
+        searchCache.set(cacheKey, places);
+        setResults(places);
+        setFailed(false);
         setOpen(true);
-      } catch {
-        /* aborted or offline */
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") setFailed(true);
       } finally {
         setLoading(false);
       }
@@ -74,6 +90,9 @@ export default function PlaceSearch({
   return (
     <div className="relative">
       <Input
+        id={id}
+        invalid={invalid}
+        autoComplete="off"
         value={q}
         placeholder="Area, building or landmark"
         onChange={(e) => {
@@ -87,6 +106,16 @@ export default function PlaceSearch({
         <span className="absolute right-3 top-4 text-muted">
           <Spinner />
         </span>
+      )}
+      {failed && (
+        <p className="mt-1.5 text-xs text-muted">
+          {typeof navigator !== "undefined" && !navigator.onLine
+            ? "You're offline. Address search needs a connection."
+            : "Address search is busy right now. Try again in a moment."}
+        </p>
+      )}
+      {open && !loading && results.length === 0 && q.trim().length >= 3 && q !== value?.label && (
+        <p className="mt-1.5 text-xs text-muted">No places found. Try a nearby landmark or the area name.</p>
       )}
       {open && results.length > 0 && (
         <ul className="absolute z-[1100] mt-1 max-h-72 w-full overflow-auto rounded-xl border border-line bg-surface-2 shadow-2xl">

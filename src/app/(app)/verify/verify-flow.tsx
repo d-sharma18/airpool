@@ -9,14 +9,14 @@ import { createClient } from "@/lib/supabase/client";
 
 type Step = "file" | "selfie" | "phone";
 
-export default function VerifyFlow() {
+export default function VerifyFlow({ initialPhone }: { initialPhone: string }) {
   const router = useRouter();
   const [step, setStep] = useState<Step>("file");
   const [aadhaar, setAadhaar] = useState<AadhaarPreview | null>(null);
   const [shareCode, setShareCode] = useState("");
   const [selfie, setSelfie] = useState<string | null>(null);
   const [match, setMatch] = useState<FaceMatchResult | null>(null);
-  const [phone, setPhone] = useState("");
+  const [phone, setPhone] = useState(initialPhone);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -181,7 +181,7 @@ export default function VerifyFlow() {
         <Card>
           <form onSubmit={submit} className="grid gap-4">
             <label>
-              <Label hint="Shared only inside locked groups">Mobile number</Label>
+              <Label hint="Must be your Aadhaar-linked number">Mobile number</Label>
               <Input
                 type="tel"
                 inputMode="numeric"
@@ -193,8 +193,8 @@ export default function VerifyFlow() {
               />
             </label>
             <p className="text-xs text-muted">
-              If this is the number linked to your Aadhaar, your co-riders will see a &ldquo;matches Aadhaar&rdquo; tick next
-              to it.
+              We check this against the mobile number linked to your Aadhaar. If it doesn&apos;t match, verification fails.
+              Co-riders see it only after a group is locked.
             </p>
             <ErrorNote>{error}</ErrorNote>
             <Button type="submit" full disabled={busy}>

@@ -1,7 +1,11 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-const PROTECTED = ["/dashboard", "/verify", "/trip", "/pool", "/profile"];
+// Everything else needs a signed-in user. API routes check auth themselves.
+const PUBLIC = new Set(["/", "/login", "/signup", "/logout", "/auth/callback"]);
+const AUTH_PAGES = new Set(["/login", "/signup"]);
+// SOS live-location links are opened by family members who don't have an account.
+const isPublic = (path: string) => PUBLIC.has(path) || path.startsWith("/sos/");
 
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request });
@@ -26,13 +30,14 @@ export async function middleware(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const path = request.nextUrl.pathname;
-  if (!user && PROTECTED.some((p) => path.startsWith(p))) {
+  if (!user && !isPublic(path)) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
-    url.searchParams.set("next", path);
+    url.search = "";
+    url.searchParams.set("next", path + request.nextUrl.search);
     return NextResponse.redirect(url);
   }
-  if (user && path === "/login") {
+  if (user && AUTH_PAGES.has(path)) {
     const url = request.nextUrl.clone();
     url.pathname = "/dashboard";
     url.search = "";
@@ -42,5 +47,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon|api/|.*\\.(?:png|jpg|svg|webp)$).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/|.*\\.(?:png|jpg|jpeg|svg|webp|ico|txt)$).*)"],
 };

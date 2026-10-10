@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { allow, tooMany } from "@/lib/rate-limit";
 import { createAdminClient, createClient } from "@/lib/supabase/server";
+import { PHONE_RE, normalizePhone } from "@/lib/validation";
 import { MAX_EKYC_AGE_DAYS, ageOn, identityHash, mobileMatches, verifyOfflineXml } from "@/lib/aadhaar-server";
 
 export const runtime = "nodejs";
@@ -18,12 +20,13 @@ export async function POST(req: NextRequest) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Sign in first" }, { status: 401 });
+  if (!(await allow("aadhaar", user.id))) return tooMany("Too many verification attempts. Try again in an hour.");
 
   const body = (await req.json().catch(() => null)) as Body | null;
   if (!body?.xml || body.xml.length > 2_000_000) return NextResponse.json({ error: "Missing eKYC XML" }, { status: 400 });
   if (!/^\d{4}$/.test(body.shareCode ?? "")) return NextResponse.json({ error: "Share code must be 4 digits" }, { status: 400 });
-  const phone = (body.phone ?? "").replace(/\D/g, "").slice(-10);
-  if (!/^[6-9]\d{9}$/.test(phone)) return NextResponse.json({ error: "Enter a valid 10-digit Indian mobile number" }, { status: 400 });
+  const phone = normalizePhone(body.phone ?? "");
+  if (!PHONE_RE.test(phone)) return NextResponse.json({ error: "Enter a valid 10-digit Indian mobile number" }, { status: 400 });
   if (typeof body.faceScore !== "number" || body.faceScore < FACE_MATCH_MIN) {
     return NextResponse.json({ error: "Selfie didn't match the Aadhaar photo" }, { status: 400 });
   }
@@ -45,37 +48,44 @@ export async function POST(req: NextRequest) {
   }
   if (ageOn(a.dob) < 18) return NextResponse.json({ error: "Airpool is for adults (18+) only" }, { status: 400 });
 
+  // The phone must be the Aadhaar-linked mobile; UIDAI embeds a salted hash of it.
+  if (!mobileMatches(a, phone, body.shareCode)) {
+    return NextResponse.json(
+      { error: "This mobile number isn't the one linked to your Aadhaar. Enter the Aadhaar-linked number and try again." },
+      { status: 400 },
+    );
+  }
+
   const admin = createAdminClient();
   const hash = identityHash(a);
   const { data: existing } = await admin
-    .from("profile_private")
-    .select("user_id")
+    .from("profiles")
+    .select("id")
     .eq("aadhaar_hash", hash)
-    .neq("user_id", user.id)
+    .neq("id", user.id)
     .maybeSingle();
   if (existing) return NextResponse.json({ error: "This Aadhaar is already linked to another Airpool account" }, { status: 409 });
 
-  const phoneVerified = mobileMatches(a, phone, body.shareCode);
-
-  const { error: e1 } = await admin
-    .from("profile_private")
-    .update({ phone, phone_verified: phoneVerified, aadhaar_hash: hash, aadhaar_last4: a.last4 })
-    .eq("user_id", user.id);
-  const { error: e2 } = await admin
+  // Service role: the only writer of the verification columns.
+  const { error } = await admin
     .from("profiles")
     .update({
-      full_name: a.name,
-      gender: a.gender,
+      phone,
+      phone_verified: true,
+      verified: true,
+      verified_name: a.name,
+      verified_gender: a.gender,
+      aadhaar_last4: a.last4,
+      verified_at: new Date().toISOString(),
       birth_year: a.birthYear,
-      aadhaar_verified: true,
       aadhaar_signature_ok: a.signatureOk,
       face_match_score: Math.round(body.faceScore * 100) / 100,
-      verified_at: new Date().toISOString(),
+      aadhaar_hash: hash,
       avatar_path: body.selfiePath,
     })
     .eq("id", user.id);
-  if (e1 || e2) return NextResponse.json({ error: (e1 ?? e2)!.message }, { status: 500 });
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // Nothing else from the XML (address, photo, DOB) is stored.
-  return NextResponse.json({ ok: true, name: a.name, gender: a.gender, phoneVerified, signatureOk: a.signatureOk });
+  // Nothing else from the XML (address, photo, full DOB) is stored.
+  return NextResponse.json({ ok: true, name: a.name, gender: a.gender, signatureOk: a.signatureOk });
 }

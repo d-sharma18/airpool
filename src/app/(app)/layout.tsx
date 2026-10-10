@@ -11,7 +11,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         <Link href="/dashboard" className="flex items-center gap-2 font-mono text-sm tracking-widest text-accent">
           <span className="inline-block size-2 rounded-full bg-accent" /> AIRPOOL
         </Link>
-        {profile?.aadhaar_verified ? (
+        {profile?.verified ? (
           <Badge tone="ok">✓ Verified</Badge>
         ) : (
           <Link href="/verify">

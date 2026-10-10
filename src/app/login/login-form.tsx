@@ -1,101 +1,107 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
-import { Button, ErrorNote, Input, Label, Spinner, cx } from "@/components/ui";
+import { GoogleButton, OrDivider } from "@/components/google-button";
+import { useToast } from "@/components/toaster";
+import { Button, ErrorNote, Field, Input, Spinner } from "@/components/ui";
+import { describeAuthError, type AuthErrorKind } from "@/lib/auth-errors";
 import { createClient } from "@/lib/supabase/client";
+import { safeNext, validateEmail } from "@/lib/validation";
 
 export default function LoginForm() {
-  const supabase = createClient();
   const router = useRouter();
   const params = useSearchParams();
-  const next = params.get("next")?.startsWith("/") ? params.get("next")! : "/dashboard";
+  const toast = useToast();
+  const next = safeNext(params.get("next"));
 
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(params.get("email") ?? "");
   const [password, setPassword] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<{ email?: string | null; password?: string | null }>({});
+  const [error, setError] = useState<{ kind: AuthErrorKind; message: string } | null>(
+    params.get("error") ? { kind: "other", message: params.get("error")! } : null,
+  );
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(params.get("error") ?? "");
-  const [notice, setNotice] = useState("");
-
-  const callback = () => `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`;
-
-  async function google() {
-    setBusy(true);
-    const { error } = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: callback() } });
-    if (error) {
-      setError(error.message);
-      setBusy(false);
-    }
-  }
+  const [resent, setResent] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    const errs = { email: validateEmail(email), password: password ? null : "Enter your password." };
+    setFieldErrors(errs);
+    if (errs.email || errs.password) return;
+
     setBusy(true);
-    setError("");
-    setNotice("");
-    const { data, error } =
-      mode === "signin"
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password, options: { emailRedirectTo: callback() } });
+    setError(null);
+    setResent(false);
+    const { error } = await createClient().auth.signInWithPassword({ email: email.trim(), password });
     setBusy(false);
-    if (error) return setError(error.message);
-    if (mode === "signup" && !data.session) {
-      return setNotice("Check your inbox to confirm your email, then sign in.");
-    }
+    if (error) return setError(describeAuthError(error));
     router.replace(next);
     router.refresh();
   }
 
+  async function resend() {
+    const { error } = await createClient().auth.resend({
+      type: "signup",
+      email: email.trim(),
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}` },
+    });
+    if (error) return toast(describeAuthError(error).message, "error");
+    setResent(true);
+    toast("Verification email sent", "success");
+  }
+
   return (
     <div className="grid gap-5">
-      <Button variant="ghost" full onClick={google} disabled={busy}>
-        <svg viewBox="0 0 24 24" className="size-5" aria-hidden>
-          <path fill="#EA4335" d="M12 10.2v3.9h5.5c-.2 1.3-1.6 3.8-5.5 3.8-3.3 0-6-2.7-6-6.1s2.7-6.1 6-6.1c1.9 0 3.1.8 3.8 1.5l2.6-2.5C16.8 3.2 14.6 2.2 12 2.2 6.6 2.2 2.2 6.6 2.2 12s4.4 9.8 9.8 9.8c5.7 0 9.4-4 9.4-9.6 0-.6-.1-1.1-.2-1.6H12z" />
-        </svg>
-        Continue with Google
-      </Button>
+      <GoogleButton next={next} />
+      <OrDivider />
 
-      <div className="flex items-center gap-3 text-xs uppercase tracking-wider text-muted">
-        <span className="h-px flex-1 bg-line" /> or email <span className="h-px flex-1 bg-line" />
-      </div>
-
-      <div className="grid grid-cols-2 rounded-xl bg-surface-2 p-1 text-sm">
-        {(["signin", "signup"] as const).map((m) => (
-          <button
-            key={m}
-            type="button"
-            onClick={() => setMode(m)}
-            className={cx("h-10 rounded-lg font-medium", mode === m ? "bg-line text-ink" : "text-muted")}
-          >
-            {m === "signin" ? "Sign in" : "Create account"}
-          </button>
-        ))}
-      </div>
-
-      <form onSubmit={submit} className="grid gap-4">
-        <label>
-          <Label>Email</Label>
-          <Input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-        </label>
-        <label>
-          <Label hint={mode === "signup" ? "At least 8 characters" : undefined}>Password</Label>
+      <form onSubmit={submit} noValidate className="grid gap-4">
+        <Field id="email" label="Email" error={fieldErrors.email}>
           <Input
+            id="email"
+            type="email"
+            autoComplete="email"
+            inputMode="email"
+            value={email}
+            invalid={!!fieldErrors.email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </Field>
+        <Field id="password" label="Password" error={fieldErrors.password}>
+          <Input
+            id="password"
             type="password"
-            autoComplete={mode === "signin" ? "current-password" : "new-password"}
-            minLength={8}
-            required
+            autoComplete="current-password"
             value={password}
+            invalid={!!fieldErrors.password || error?.kind === "wrong_password"}
             onChange={(e) => setPassword(e.target.value)}
           />
-        </label>
-        <ErrorNote>{error}</ErrorNote>
-        {notice && <p className="rounded-xl bg-ok/10 px-3 py-2 text-sm text-ok">{notice}</p>}
+        </Field>
+
+        {error && (
+          <div className="grid gap-2">
+            <ErrorNote>{error.message}</ErrorNote>
+            {error.kind === "unverified_email" && (
+              <Button type="button" variant="ghost" full onClick={resend} disabled={resent}>
+                {resent ? "Email sent. Check your inbox" : "Resend verification email"}
+              </Button>
+            )}
+          </div>
+        )}
+
         <Button type="submit" full disabled={busy}>
-          {busy && <Spinner />}
-          {mode === "signin" ? "Sign in" : "Create account"}
+          {busy && <Spinner />} Log in
         </Button>
       </form>
+
+      <p className="text-center text-sm text-muted">
+        New to Airpool?{" "}
+        <Link href={`/signup${next !== "/dashboard" ? `?next=${encodeURIComponent(next)}` : ""}`} className="text-accent underline">
+          Create an account
+        </Link>
+      </p>
     </div>
   );
 }
